@@ -2,7 +2,7 @@ from sqlalchemy import (
     String, Integer, Float, ForeignKey, Enum as SqlEnum, Boolean, text
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
-from typing import Optional
+from typing import Optional, List
 import datetime
 import sqlalchemy as sa
 from enum import Enum
@@ -92,8 +92,6 @@ class Product(Base):
     model: Mapped[Optional[str]] = mapped_column(String(255))
     price: Mapped[Optional[float]] = mapped_column(Float)
     note: Mapped[Optional[str]] = mapped_column(String(255))
-    season: Mapped[Optional[SeasonEnum]] = mapped_column(SqlEnum(SeasonEnum), nullable=True)
-
     tire: Mapped["Tire"] = relationship(back_populates="product", uselist=False)
     component: Mapped["Component"] = relationship(back_populates="product", uselist=False)
 
@@ -107,6 +105,7 @@ class Tire(Base):
     profile: Mapped[Optional[str]] = mapped_column(String(255))
     diameter: Mapped[Optional[str]] = mapped_column(String(255))
     index: Mapped[Optional[str]] = mapped_column(String(255))
+    season: Mapped[Optional[SeasonEnum]] = mapped_column(SqlEnum(SeasonEnum), nullable=True)
     spikes: Mapped[Optional[str]] = mapped_column(String(255))
     year: Mapped[Optional[int]] = mapped_column(Integer)
     country: Mapped[Optional[str]] = mapped_column(String(255))
@@ -120,7 +119,11 @@ class Component(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
     category: Mapped[ComponentCategoryEnum] = mapped_column(SqlEnum(ComponentCategoryEnum))
-
+    parameters: Mapped[str] = mapped_column(String(255))
+    compatibility: Mapped[str] = mapped_column(String(255))
+    weight: Mapped[int] = mapped_column()
+    color: Mapped[str] = mapped_column(String(255))
+    material: Mapped[str] = mapped_column(String(255))
     product: Mapped[Product] = relationship(back_populates="component")
 
 
@@ -129,6 +132,7 @@ class Warehouse(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
+    rack: Mapped[str] = mapped_column(String(255))
     shelf: Mapped[str] = mapped_column(String(255))
     cell: Mapped[str] = mapped_column(String(255))
     quantity: Mapped[int] = mapped_column(Integer, default=0)
@@ -141,6 +145,7 @@ class Storage(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
+    rack: Mapped[str] = mapped_column(String(255))
     shelf: Mapped[str] = mapped_column(String(255))
     cell: Mapped[str] = mapped_column(String(255))
     quantity: Mapped[int] = mapped_column(Integer, default=0)
@@ -152,12 +157,22 @@ class Order(Base):
     __tablename__ = "orders"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
-    quantity: Mapped[int] = mapped_column(Integer)
-    total_price: Mapped[Optional[float]] = mapped_column(Float)
     status: Mapped[OrderStatusEnum] = mapped_column(SqlEnum(OrderStatusEnum), default=OrderStatusEnum.DRAFT)
     customer_name: Mapped[Optional[str]] = mapped_column(String(255))
     customer_phone: Mapped[Optional[str]] = mapped_column(String(255))
     service: Mapped[Optional[str]] = mapped_column(String(255))
 
+    items: Mapped[List["OrderItem"]] = relationship(back_populates="order")
+
+
+class OrderItem(Base):
+    __tablename__ = "order_items"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"))
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
+    quantity: Mapped[int] = mapped_column(Integer)
+    price: Mapped[Optional[float]] = mapped_column(Float)  
+
+    order: Mapped[Order] = relationship(back_populates="items")
     product: Mapped[Product] = relationship()
