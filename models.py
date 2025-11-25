@@ -140,6 +140,7 @@ class Warehouse(Base):
     product: Mapped[Product] = relationship()
 
 
+
 class Storage(Base):
     __tablename__ = "storage"
 

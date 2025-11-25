@@ -9,7 +9,51 @@ from db import get_db
 
 router = APIRouter()
 
+from sqlalchemy import func
 
+def find_free_location(db: Session, prefix: str, is_large: bool = False):
+    """
+    Ищет следующую свободную ячейку в стеллажах с префиксом (Х, З, К и т.д.)
+    prefix: 'Х', 'З', 'К'
+    is_large: True — крупногабарит (Х), False — коробки (З, К)
+    """
+    # Определяем, где ищем: в Storage (хранение)
+    query = db.query(models.Storage.rack, models.Storage.shelf, models.Storage.cell, models.Storage.quantity)
+
+    # Фильтр по префиксу стеллажа
+    query = query.filter(models.Storage.rack.ilike(f"{prefix}%"))
+
+    occupied = query.all()
+
+    # Группируем по rack (Х1, Х2, З1 и т.д.)
+    rack_data = {}
+    for rack, shelf, cell, qty in occupied:
+        if qty > 0:  # только занятые места
+            rack_data.setdefault(rack, []).append((int(shelf), int(cell)))
+
+    # Список всех возможных стеллажей
+    possible_racks = [f"{prefix}{i}" for i in range(1, 20)]  # Х1..Х19, З1..З19 и т.д.
+
+    for rack in possible_racks:
+        cells_in_rack = rack_data.get(rack, [])
+
+        # Считаем максимальную использованную ячейку в этом стеллаже
+        max_cell = -1
+        for _, cell in cells_in_rack:
+            if cell > max_cell:
+                max_cell = cell
+
+        next_cell = max_cell + 1
+
+        # Определяем полку: каждая полка — по 50 мест (можно настроить)
+        CELLS_PER_SHELF = 50
+        shelf = next_cell // CELLS_PER_SHELF
+        cell_in_shelf = next_cell % CELLS_PER_SHELF
+
+        return rack, str(shelf), str(cell_in_shelf)
+
+    # Если вдруг закончились места (маловероятно)
+    raise HTTPException(status_code=400, detail=f"Нет свободных мест в стеллажах {prefix}*")
 
 @router.get("/products/", response_model=List[dict])
 @router.get("/products", response_model=List[dict])
@@ -231,7 +275,7 @@ def read_orders(db: Session = Depends(get_db)):
 @router.post("/orders", response_model=schemas.OrderRead)
 def create_order(item: schemas.OrderCreate, db: Session = Depends(get_db)):
     order_obj = models.Order(
-        status=item.status or models.OrderStatusEnum.DRAFT,
+        status=models.OrderStatusEnum.DRAFT,  # сразу в работу, если хранение
         customer_name=item.customer_name,
         customer_phone=item.customer_phone,
         service=item.service
@@ -240,32 +284,197 @@ def create_order(item: schemas.OrderCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(order_obj)
 
+    # Добавляем товары
     for i in item.items:
-        order_item_obj = models.OrderItem(
+        db.add(models.OrderItem(
             order_id=order_obj.id,
             product_id=i.product_id,
             quantity=i.quantity,
             price=i.price
-        )
-        db.add(order_item_obj)
+        ))
+
+    # Если это хранение — сразу принимаем на хранение с автоподбором ячейки
+    if order_obj.service == "хранение":
+        for order_item in item.items:
+            product_id = order_item.product_id
+            qty = order_item.quantity
+
+            # Пример: если это шина диаметром >17" — крупногабарит → стеллаж Х
+            # Иначе — коробка → стеллаж З или К
+            product = db.query(models.Product).get(product_id)
+            is_large = False
+            if product.tire and product.tire.diameter:
+                try:
+                    diameter = int(product.tire.diameter.replace('"', '').strip())
+                    is_large = diameter >= 18
+                except:
+                    is_large = False
+
+            prefix = "Х" if is_large else "З"  # можно добавить К позже
+
+            rack, shelf, cell = find_free_location(db, prefix, is_large=is_large)
+
+            # Проверяем, есть ли уже запись
+            existing = db.query(models.Storage).filter_by(
+                product_id=product_id,
+                rack=rack,
+                shelf=shelf,
+                cell=cell
+            ).first()
+
+            if existing:
+                existing.quantity += qty
+            else:
+                db.add(models.Storage(
+                    product_id=product_id,
+                    rack=rack,
+                    shelf=shelf,
+                    cell=cell,
+                    quantity=qty
+                ))
+
     db.commit()
     db.refresh(order_obj)
     return order_obj
-
-
 @router.patch("/orders/{id}", response_model=schemas.OrderRead)
 @router.patch("/orders/{id}/", response_model=schemas.OrderRead)
 def update_order(id: int, item: schemas.OrderUpdate, db: Session = Depends(get_db)):
     order_obj = db.query(models.Order).get(id)
-    for key, value in item.dict(exclude={"items"}, exclude_unset=True).items():
+    if not order_obj:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    old_status = order_obj.status
+    new_status = item.status or old_status
+    is_storage_service = order_obj.service == "хранение"
+
+    # Обновляем обычные поля заказа (кроме items)
+    update_data = item.dict(exclude={"items"}, exclude_unset=True)
+    for key, value in update_data.items():
         setattr(order_obj, key, value)
+
+    # === ГЛАВНАЯ ЛОГИКА: только если статус изменился ===
+    if new_status != old_status:
+
+        # ——————————————————————————————————————————————————
+        # 1. УСЛУГА "ХРАНЕНИЕ"
+        # ——————————————————————————————————————————————————
+        if is_storage_service:
+
+            # ПРИНЯТИЕ НА ХРАНЕНИЕ: любой → DRAFT ("в работе")
+            if new_status == models.OrderStatusEnum.DRAFT:
+                for order_item in order_obj.items:
+                    product_id = order_item.product_id
+                    qty = order_item.quantity
+
+                    # Определяем: крупногабарит или нет (по диаметру шины)
+                    product = db.query(models.Product).get(product_id)
+                    is_large = False
+                    if product and product.tire and product.tire.diameter:
+                        try:
+                            diameter = int(product.tire.diameter.replace('"', '').strip())
+                            is_large = diameter >= 18
+                        except (ValueError, AttributeError):
+                            is_large = False
+
+                    prefix = "Х" if is_large else "З"  # Х = крупногабарит, З = средние/мелкие в коробках
+
+                    # Находим свободное место
+                    rack, shelf, cell = find_free_location(db, prefix)
+
+                    # Проверяем, нет ли уже такой ячейки с этим товаром (на всякий случай)
+                    existing = db.query(models.Storage).filter_by(
+                        product_id=product_id,
+                        rack=rack,
+                        shelf=shelf,
+                        cell=cell
+                    ).first()
+
+                    if existing:
+                        existing.quantity += qty
+                    else:
+                        db.add(models.Storage(
+                            product_id=product_id,
+                            rack=rack,
+                            shelf=shelf,
+                            cell=cell,
+                            quantity=qty
+                        ))
+
+            # ВЫДАЧА КЛИЕНТУ: DRAFT → PROCESSED
+            elif new_status == models.OrderStatusEnum.PROCESSED and old_status == models.OrderStatusEnum.DRAFT:
+                for order_item in order_obj.items:
+                    storage_entry = db.query(models.Storage).filter_by(
+                        product_id=order_item.product_id
+                    ).first()
+
+                    if not storage_entry or storage_entry.quantity < order_item.quantity:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Недостаточно товара на хранении (ID: {order_item.product_id})"
+                        )
+
+                    storage_entry.quantity -= order_item.quantity
+                    if storage_entry.quantity <= 0:
+                        db.delete(storage_entry)
+
+            # ОТМЕНА ПОСЛЕ ПРИЁМА: DRAFT → CANCELLED
+            elif new_status == models.OrderStatusEnum.CANCELLED and old_status == models.OrderStatusEnum.DRAFT:
+                for order_item in order_obj.items:
+                    storage_entry = db.query(models.Storage).filter_by(
+                        product_id=order_item.product_id
+                    ).first()
+
+                    if storage_entry:
+                        storage_entry.quantity -= order_item.quantity
+                        if storage_entry.quantity <= 0:
+                            db.delete(storage_entry)
+
+        # ——————————————————————————————————————————————————
+        # 2. ОБЫЧНАЯ ПРОДАЖА (не хранение)
+        # ——————————————————————————————————————————————————
+        else:
+            # Списание со склада при продаже
+            if new_status == models.OrderStatusEnum.PROCESSED:
+                for order_item in order_obj.items:
+                    product_id = order_item.product_id
+                    qty = order_item.quantity
+
+                    # Ищем сначала в warehouse, потом в storage
+                    wh = db.query(models.Warehouse).filter_by(product_id=product_id).first()
+                    st = db.query(models.Storage).filter_by(product_id=product_id).first()
+
+                    if wh and wh.quantity >= qty:
+                        wh.quantity -= qty
+                    elif st and st.quantity >= qty:
+                        st.quantity -= qty
+                    else:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Недостаточно товара {product_id} на складе или хранении"
+                        )
+
+            # Возврат при отмене продажи
+            elif new_status == models.OrderStatusEnum.CANCELLED and old_status == models.OrderStatusEnum.PROCESSED:
+                for order_item in order_obj.items:
+                    product_id = order_item.product_id
+                    qty = order_item.quantity
+
+                    wh = db.query(models.Warehouse).filter_by(product_id=product_id).first()
+                    if wh:
+                        wh.quantity += qty
+                    else:
+                        db.add(models.Warehouse(
+                            product_id=product_id,
+                            rack="Возврат",
+                            shelf="Отмена",
+                            cell="",
+                            quantity=qty
+                        ))
+
     db.commit()
     db.refresh(order_obj)
     return order_obj
 
-
-@router.delete("/orders/{id}")
-@router.delete("/orders/{id}/")
 def delete_order(id: int, db: Session = Depends(get_db)):
     order_obj = db.query(models.Order).get(id)
     db.delete(order_obj)
