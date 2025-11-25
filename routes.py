@@ -9,73 +9,138 @@ from db import get_db
 
 router = APIRouter()
 
-from sqlalchemy import func
 
-def find_free_location(db: Session, prefix: str, is_large: bool = False):
-    """
-    Ищет следующую свободную ячейку в стеллажах с префиксом (Х, З, К и т.д.)
-    prefix: 'Х', 'З', 'К'
-    is_large: True — крупногабарит (Х), False — коробки (З, К)
-    """
-    # Определяем, где ищем: в Storage (хранение)
-    query = db.query(models.Storage.rack, models.Storage.shelf, models.Storage.cell, models.Storage.quantity)
+def product_to_pydantic(product: models.Product) -> schemas.ProductReadWithDetails:
+    tire_read = None
+    component_read = None
 
-    # Фильтр по префиксу стеллажа
-    query = query.filter(models.Storage.rack.ilike(f"{prefix}%"))
+    if product.tire:
+        tire_read = schemas.TireRead(
+            id=product.tire.id,
+            product_id=product.tire.product_id,
+            width=product.tire.width,
+            profile=product.tire.profile,
+            diameter=product.tire.diameter,
+            index=product.tire.index,
+            spikes=product.tire.spikes,
+            year=product.tire.year,
+            country=product.tire.country,
+            season=product.tire.season,
+        )
 
-    occupied = query.all()
+    if product.component:
+        component_read = schemas.ComponentRead(
+            id=product.component.id,
+            product_id=product.component.product_id,  
+            category=product.component.category,
+            parameters=product.component.parameters,
+            compatibility=product.component.compatibility,
+            weight=product.component.weight,
+            material=product.component.material,
+            color=product.component.color,
+        )
 
-    # Группируем по rack (Х1, Х2, З1 и т.д.)
-    rack_data = {}
-    for rack, shelf, cell, qty in occupied:
-        if qty > 0:  # только занятые места
-            rack_data.setdefault(rack, []).append((int(shelf), int(cell)))
+    return schemas.ProductReadWithDetails(
+        id=product.id,
+        brand=product.brand,
+        model=product.model,
+        price=product.price,
+        note=product.note,
+        tire=tire_read,
+        component=component_read,
+    )
 
-    # Список всех возможных стеллажей
-    possible_racks = [f"{prefix}{i}" for i in range(1, 20)]  # Х1..Х19, З1..З19 и т.д.
 
-    for rack in possible_racks:
-        cells_in_rack = rack_data.get(rack, [])
+def find_free_warehouse_location(db: Session, prefix: str) -> tuple[str, str, str]:
+    """Находит свободную ячейку в стеллажах с префиксом (З, Л, К)"""
+    CELLS_PER_SHELF = 50
 
-        # Считаем максимальную использованную ячейку в этом стеллаже
-        max_cell = -1
-        for _, cell in cells_in_rack:
-            if cell > max_cell:
-                max_cell = cell
+    occupied = db.query(
+        models.Warehouse.rack,
+        models.Warehouse.shelf,
+        models.Warehouse.cell
+    ).filter(
+        models.Warehouse.rack.ilike(f"{prefix}%"),
+        models.Warehouse.quantity > 0
+    ).all()
 
-        next_cell = max_cell + 1
+    max_cell_per_rack = {}
+    for rack, shelf, cell in occupied:
+        try:
+            cell_num = int(cell)
+            current = max_cell_per_rack.get(rack, -1)
+            max_cell_per_rack[rack] = max(current, cell_num)
+        except:
+            continue
 
-        # Определяем полку: каждая полка — по 50 мест (можно настроить)
-        CELLS_PER_SHELF = 50
+    for i in range(1, 30):
+        rack = f"{prefix}{i}"
+        next_cell = max_cell_per_rack.get(rack, -1) + 1
         shelf = next_cell // CELLS_PER_SHELF
         cell_in_shelf = next_cell % CELLS_PER_SHELF
-
         return rack, str(shelf), str(cell_in_shelf)
 
-    # Если вдруг закончились места (маловероятно)
-    raise HTTPException(status_code=400, detail=f"Нет свободных мест в стеллажах {prefix}*")
+    raise HTTPException(status_code=400, detail=f"Нет места в стеллажах {prefix}*")
+
 
 @router.get("/products/", response_model=List[dict])
+
+
 @router.get("/products", response_model=List[dict])
 def get_products(db: Session = Depends(get_db)):
     warehouse = db.query(models.Warehouse).all()
     storage = db.query(models.Storage).all()
-    products = db.query(models.Product).all()
+    products = db.query(models.Product).options(
+        joinedload(models.Product.tire),
+        joinedload(models.Product.component)
+    ).all()
+
+    
+    warehouse_qty = {w.product_id: w.quantity for w in warehouse}
+    storage_qty = {s.product_id: s.quantity for s in storage}
 
     result = []
     for p in products:
-        w_qty = sum(w.quantity for w in warehouse if w.product_id == p.id)
-        s_qty = sum(s.quantity for s in storage if s.product_id == p.id)
+        tire_data = None
+        component_data = None
+
+        if p.tire:
+            tire_data = {
+                "id": p.tire.id,
+                "width": p.tire.width,
+                "profile": p.tire.profile,
+                "diameter": p.tire.diameter,
+                "index": p.tire.index,
+                "spikes": p.tire.spikes,
+                "year": p.tire.year,
+                "country": p.tire.country,
+                "season": p.tire.season,
+            }
+
+        if p.component:
+            component_data = {
+                "id": p.component.id,
+                "category": p.component.category,
+                "parameters": p.component.parameters,
+                "compatibility": p.component.compatibility,
+                "weight": p.component.weight,
+                "material": p.component.material,
+                "color": p.component.color,
+            }
+
         result.append({
             "id": p.id,
             "brand": p.brand,
             "model": p.model,
             "price": p.price,
-            "warehouse_qty": w_qty,
-            "storage_qty": s_qty,
+            "note": p.note,
+            "tire": tire_data,           
+            "component": component_data, 
+            "warehouse_qty": warehouse_qty.get(p.id, 0),
+            "storage_qty": storage_qty.get(p.id, 0),
         })
-    return result
 
+    return result
 
 @router.post("/products/", response_model=schemas.ProductRead)
 @router.post("/products", response_model=schemas.ProductRead)
@@ -107,26 +172,24 @@ def delete_product(id: int, db: Session = Depends(get_db)):
     return {"ok": True}
 
 
-
-@router.post("/tires/", response_model=schemas.TireRead)
 @router.post("/tires", response_model=schemas.TireRead)
+@router.post("/tires/", response_model=schemas.TireRead)
 def create_tire(item: schemas.TireCreate, db: Session = Depends(get_db)):
-    obj = models.Tire(**item.dict())
-    db.add(obj)
+    db_tire = models.Tire(**item.dict())
+    db.add(db_tire)
     db.commit()
-    db.refresh(obj)
-    return obj
+    db.refresh(db_tire)
+    return db_tire
 
 
-@router.put("/tires/{id}", response_model=schemas.TireRead)
-@router.put("/tires/{id}/", response_model=schemas.TireRead)
-def update_tire(id: int, item: schemas.TireCreate, db: Session = Depends(get_db)):
-    obj = db.query(models.Tire).get(id)
-    for key, value in item.dict(exclude_unset=True).items():
-        setattr(obj, key, value)
+@router.post("/components", response_model=schemas.ComponentRead)
+@router.post("/components/", response_model=schemas.ComponentRead)
+def create_component(item: schemas.ComponentCreate, db: Session = Depends(get_db)):
+    db_comp = models.Component(**item.dict())
+    db.add(db_comp)
     db.commit()
-    db.refresh(obj)
-    return obj
+    db.refresh(db_comp)
+    return db_comp
 
 
 @router.delete("/tires/{id}")
@@ -136,7 +199,6 @@ def delete_tire(id: int, db: Session = Depends(get_db)):
     db.delete(obj)
     db.commit()
     return {"ok": True}
-
 
 
 @router.post("/components/", response_model=schemas.ComponentRead)
@@ -152,7 +214,7 @@ def create_component(item: schemas.ComponentCreate, db: Session = Depends(get_db
 @router.put("/components/{id}", response_model=schemas.ComponentRead)
 @router.put("/components/{id}/", response_model=schemas.ComponentRead)
 def update_component(id: int, item: schemas.ComponentCreate, db: Session = Depends(get_db)):
-    obj = db.query(models.Component).get(id)
+    obj = db.query(models.Component).filter_by(product_id=id).first()
     for key, value in item.dict(exclude_unset=True).items():
         setattr(obj, key, value)
     db.commit()
@@ -160,6 +222,24 @@ def update_component(id: int, item: schemas.ComponentCreate, db: Session = Depen
     return obj
 
 
+@router.patch("/tires/{id}", response_model=schemas.TireRead)
+@router.patch("/tires/{id}/", response_model=schemas.TireRead)
+def update_tire(
+        id: int,
+        item: schemas.TireUpdate,  
+        db: Session = Depends(get_db)
+):
+    obj = db.query(models.Tire).filter_by(product_id=id).first()
+    if not obj:
+        raise HTTPException(status_code=404, detail="Шина не найдена")
+
+    update_data = item.dict(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(obj, key, value)
+
+    db.commit()
+    db.refresh(obj)
+    return obj
 @router.delete("/components/{id}")
 @router.delete("/components/{id}/")
 def delete_component(id: int, db: Session = Depends(get_db)):
@@ -167,7 +247,6 @@ def delete_component(id: int, db: Session = Depends(get_db)):
     db.delete(obj)
     db.commit()
     return {"ok": True}
-
 
 
 @router.get("/warehouse/", response_model=List[schemas.WarehouseRead])
@@ -189,19 +268,72 @@ def read_warehouse(db: Session = Depends(get_db),
 @router.post("/warehouse/", response_model=schemas.WarehouseRead)
 @router.post("/warehouse", response_model=schemas.WarehouseRead)
 def create_warehouse(item: schemas.WarehouseCreate, db: Session = Depends(get_db)):
-    obj = models.Warehouse(**item.dict())
-    db.add(obj)
-    db.commit()
-    db.refresh(obj)
-    return obj
+    product = db.query(models.Product).filter(models.Product.id == item.product_id).first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Продукт не найден")
+
+    
+    prefix = None
+
+    if product.tire:
+        season = product.tire.season
+        if season == "winter":
+            prefix = "З"    
+        elif season == "summer":
+            prefix = "Л"    
+        else:
+            prefix = "З"    
+    elif product.component:
+        prefix = "К"        
+    else:
+        raise HTTPException(status_code=400, detail="Неизвестный тип товара")
+
+    
+    rack, shelf, cell = find_free_warehouse_location(db, prefix)
+
+    
+    existing = db.query(models.Warehouse).filter_by(
+        product_id=item.product_id,
+        rack=rack,
+        shelf=shelf,
+        cell=cell
+    ).first()
+
+    if existing:
+        existing.quantity += item.quantity
+        db.commit()
+        db.refresh(existing)
+        return existing
+    else:
+        obj = models.Warehouse(
+            product_id=item.product_id,
+            rack=rack,
+            shelf=shelf,
+            cell=cell,
+            quantity=item.quantity
+        )
+        db.add(obj)
+        db.commit()
+        db.refresh(obj)
+        return obj
 
 
-@router.put("/warehouse/{id}", response_model=schemas.WarehouseRead)
-@router.put("/warehouse/{id}/", response_model=schemas.WarehouseRead)
-def update_warehouse(id: int, item: schemas.WarehouseCreate, db: Session = Depends(get_db)):
+
+@router.patch("/warehouse/{id}", response_model=schemas.WarehouseRead)
+@router.patch("/warehouse/{id}/", response_model=schemas.WarehouseRead)
+def update_warehouse(
+        id: int,
+        item: schemas.WarehouseUpdate,  
+        db: Session = Depends(get_db)
+):
     obj = db.query(models.Warehouse).get(id)
-    for key, value in item.dict(exclude_unset=True).items():
+    if not obj:
+        raise HTTPException(status_code=404, detail="Запись на складе не найдена")
+
+    update_data = item.dict(exclude_unset=True)
+    for key, value in update_data.items():
         setattr(obj, key, value)
+
     db.commit()
     db.refresh(obj)
     return obj
@@ -214,7 +346,6 @@ def delete_warehouse(id: int, db: Session = Depends(get_db)):
     db.delete(obj)
     db.commit()
     return {"ok": True}
-
 
 
 @router.get("/storage/", response_model=List[schemas.StorageRead])
@@ -263,7 +394,6 @@ def delete_storage(id: int, db: Session = Depends(get_db)):
     return {"ok": True}
 
 
-
 @router.get("/orders/", response_model=List[schemas.OrderRead])
 @router.get("/orders", response_model=List[schemas.OrderRead])
 def read_orders(db: Session = Depends(get_db)):
@@ -275,7 +405,7 @@ def read_orders(db: Session = Depends(get_db)):
 @router.post("/orders", response_model=schemas.OrderRead)
 def create_order(item: schemas.OrderCreate, db: Session = Depends(get_db)):
     order_obj = models.Order(
-        status=models.OrderStatusEnum.DRAFT,  # сразу в работу, если хранение
+        status=models.OrderStatusEnum.DRAFT,  
         customer_name=item.customer_name,
         customer_phone=item.customer_phone,
         service=item.service
@@ -284,7 +414,7 @@ def create_order(item: schemas.OrderCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(order_obj)
 
-    # Добавляем товары
+    
     for i in item.items:
         db.add(models.OrderItem(
             order_id=order_obj.id,
@@ -293,14 +423,14 @@ def create_order(item: schemas.OrderCreate, db: Session = Depends(get_db)):
             price=i.price
         ))
 
-    # Если это хранение — сразу принимаем на хранение с автоподбором ячейки
+    
     if order_obj.service == "хранение":
         for order_item in item.items:
             product_id = order_item.product_id
             qty = order_item.quantity
 
-            # Пример: если это шина диаметром >17" — крупногабарит → стеллаж Х
-            # Иначе — коробка → стеллаж З или К
+            
+            
             product = db.query(models.Product).get(product_id)
             is_large = False
             if product.tire and product.tire.diameter:
@@ -310,11 +440,11 @@ def create_order(item: schemas.OrderCreate, db: Session = Depends(get_db)):
                 except:
                     is_large = False
 
-            prefix = "Х" if is_large else "З"  # можно добавить К позже
+            prefix = "Х" if is_large else "З"  
 
             rack, shelf, cell = find_free_location(db, prefix, is_large=is_large)
 
-            # Проверяем, есть ли уже запись
+            
             existing = db.query(models.Storage).filter_by(
                 product_id=product_id,
                 rack=rack,
@@ -336,6 +466,8 @@ def create_order(item: schemas.OrderCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(order_obj)
     return order_obj
+
+
 @router.patch("/orders/{id}", response_model=schemas.OrderRead)
 @router.patch("/orders/{id}/", response_model=schemas.OrderRead)
 def update_order(id: int, item: schemas.OrderUpdate, db: Session = Depends(get_db)):
@@ -347,26 +479,26 @@ def update_order(id: int, item: schemas.OrderUpdate, db: Session = Depends(get_d
     new_status = item.status or old_status
     is_storage_service = order_obj.service == "хранение"
 
-    # Обновляем обычные поля заказа (кроме items)
+    
     update_data = item.dict(exclude={"items"}, exclude_unset=True)
     for key, value in update_data.items():
         setattr(order_obj, key, value)
 
-    # === ГЛАВНАЯ ЛОГИКА: только если статус изменился ===
+    
     if new_status != old_status:
 
-        # ——————————————————————————————————————————————————
-        # 1. УСЛУГА "ХРАНЕНИЕ"
-        # ——————————————————————————————————————————————————
+        
+        
+        
         if is_storage_service:
 
-            # ПРИНЯТИЕ НА ХРАНЕНИЕ: любой → DRAFT ("в работе")
+            
             if new_status == models.OrderStatusEnum.DRAFT:
                 for order_item in order_obj.items:
                     product_id = order_item.product_id
                     qty = order_item.quantity
 
-                    # Определяем: крупногабарит или нет (по диаметру шины)
+                    
                     product = db.query(models.Product).get(product_id)
                     is_large = False
                     if product and product.tire and product.tire.diameter:
@@ -376,12 +508,12 @@ def update_order(id: int, item: schemas.OrderUpdate, db: Session = Depends(get_d
                         except (ValueError, AttributeError):
                             is_large = False
 
-                    prefix = "Х" if is_large else "З"  # Х = крупногабарит, З = средние/мелкие в коробках
+                    prefix = "Х" if is_large else "З"  
 
-                    # Находим свободное место
+                    
                     rack, shelf, cell = find_free_location(db, prefix)
 
-                    # Проверяем, нет ли уже такой ячейки с этим товаром (на всякий случай)
+                    
                     existing = db.query(models.Storage).filter_by(
                         product_id=product_id,
                         rack=rack,
@@ -400,7 +532,7 @@ def update_order(id: int, item: schemas.OrderUpdate, db: Session = Depends(get_d
                             quantity=qty
                         ))
 
-            # ВЫДАЧА КЛИЕНТУ: DRAFT → PROCESSED
+            
             elif new_status == models.OrderStatusEnum.PROCESSED and old_status == models.OrderStatusEnum.DRAFT:
                 for order_item in order_obj.items:
                     storage_entry = db.query(models.Storage).filter_by(
@@ -417,7 +549,7 @@ def update_order(id: int, item: schemas.OrderUpdate, db: Session = Depends(get_d
                     if storage_entry.quantity <= 0:
                         db.delete(storage_entry)
 
-            # ОТМЕНА ПОСЛЕ ПРИЁМА: DRAFT → CANCELLED
+            
             elif new_status == models.OrderStatusEnum.CANCELLED and old_status == models.OrderStatusEnum.DRAFT:
                 for order_item in order_obj.items:
                     storage_entry = db.query(models.Storage).filter_by(
@@ -429,17 +561,17 @@ def update_order(id: int, item: schemas.OrderUpdate, db: Session = Depends(get_d
                         if storage_entry.quantity <= 0:
                             db.delete(storage_entry)
 
-        # ——————————————————————————————————————————————————
-        # 2. ОБЫЧНАЯ ПРОДАЖА (не хранение)
-        # ——————————————————————————————————————————————————
+        
+        
+        
         else:
-            # Списание со склада при продаже
+            
             if new_status == models.OrderStatusEnum.PROCESSED:
                 for order_item in order_obj.items:
                     product_id = order_item.product_id
                     qty = order_item.quantity
 
-                    # Ищем сначала в warehouse, потом в storage
+                    
                     wh = db.query(models.Warehouse).filter_by(product_id=product_id).first()
                     st = db.query(models.Storage).filter_by(product_id=product_id).first()
 
@@ -453,7 +585,7 @@ def update_order(id: int, item: schemas.OrderUpdate, db: Session = Depends(get_d
                             detail=f"Недостаточно товара {product_id} на складе или хранении"
                         )
 
-            # Возврат при отмене продажи
+            
             elif new_status == models.OrderStatusEnum.CANCELLED and old_status == models.OrderStatusEnum.PROCESSED:
                 for order_item in order_obj.items:
                     product_id = order_item.product_id
@@ -475,6 +607,7 @@ def update_order(id: int, item: schemas.OrderUpdate, db: Session = Depends(get_d
     db.refresh(order_obj)
     return order_obj
 
+
 def delete_order(id: int, db: Session = Depends(get_db)):
     order_obj = db.query(models.Order).get(id)
     db.delete(order_obj)
@@ -482,24 +615,28 @@ def delete_order(id: int, db: Session = Depends(get_db)):
     return {"ok": True}
 
 
-@router.get("/inventory/", response_model=List[schemas.InventoryItem])
 @router.get("/inventory", response_model=List[schemas.InventoryItem])
+@router.get("/inventory/", response_model=List[schemas.InventoryItem])
 def read_inventory(db: Session = Depends(get_db)):
     warehouse_items = db.query(models.Warehouse).options(
         joinedload(models.Warehouse.product).joinedload(models.Product.tire),
-        joinedload(models.Warehouse.product).joinedload(models.Product.component)
+        joinedload(models.Warehouse.product).joinedload(models.Product.component),
     ).all()
 
     storage_items = db.query(models.Storage).options(
         joinedload(models.Storage.product).joinedload(models.Product.tire),
-        joinedload(models.Storage.product).joinedload(models.Product.component)
+        joinedload(models.Storage.product).joinedload(models.Product.component),
     ).all()
 
     result = []
 
-    def add_items(items, location_type):
+    def add_items(items: list, location_type: str):
         for item in items:
-            product_pyd = to_pydantic(item.product)
+            if not item.product:
+                continue
+
+            product_pyd = product_to_pydantic(item.product)
+
             result.append(
                 schemas.InventoryItem(
                     id=item.id,
@@ -510,7 +647,7 @@ def read_inventory(db: Session = Depends(get_db)):
                     quantity=item.quantity,
                     product=product_pyd,
                     tire=product_pyd.tire,
-                    component=product_pyd.component
+                    component=product_pyd.component,
                 )
             )
 
@@ -531,7 +668,7 @@ def to_pydantic(product):
                 brand=product.brand,
                 model=product.model,
                 price=product.price,
-                note=product.note
+                note=product.note,
             ),
             width=product.tire.width,
             profile=product.tire.profile,
