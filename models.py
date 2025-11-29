@@ -115,7 +115,6 @@ class Tire(Base):
 
 class Component(Base):
     __tablename__ = "components"
-
     id: Mapped[int] = mapped_column(primary_key=True)
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
     category: Mapped[ComponentCategoryEnum] = mapped_column(SqlEnum(ComponentCategoryEnum))

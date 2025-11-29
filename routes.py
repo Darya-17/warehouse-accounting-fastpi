@@ -84,20 +84,20 @@ def find_free_warehouse_location(db: Session, prefix: str) -> tuple[str, str, st
 
 
 @router.get("/products/", response_model=List[dict])
-
-
 @router.get("/products", response_model=List[dict])
 def get_products(db: Session = Depends(get_db)):
-    warehouse = db.query(models.Warehouse).all()
-    storage = db.query(models.Storage).all()
+    # Получаем записи с ID и количеством
+    warehouse_items = db.query(models.Warehouse).all()
+    storage_items = db.query(models.Storage).all()
+
     products = db.query(models.Product).options(
         joinedload(models.Product.tire),
         joinedload(models.Product.component)
     ).all()
 
-    
-    warehouse_qty = {w.product_id: w.quantity for w in warehouse}
-    storage_qty = {s.product_id: s.quantity for s in storage}
+    # Словарь: product_id → {id: ..., quantity: ...}
+    warehouse_map = {w.product_id: {"id": w.id, "quantity": w.quantity} for w in warehouse_items}
+    storage_map = {s.product_id: {"id": s.id, "quantity": s.quantity} for s in storage_items}
 
     result = []
     for p in products:
@@ -128,16 +128,39 @@ def get_products(db: Session = Depends(get_db)):
                 "color": p.component.color,
             }
 
+        w_data = warehouse_map.get(p.id, None)
+        s_data = storage_map.get(p.id, None)
+
+        w_qty = w_data["quantity"] if w_data else 0
+        s_qty = s_data["quantity"] if s_data else 0
+
+        location = []
+        if w_qty > 0: location.append("склад")
+        if s_qty > 0: location.append("хранение")
+        location_str = ", ".join(location) if location else "нет на складе"
+
         result.append({
             "id": p.id,
             "brand": p.brand,
             "model": p.model,
             "price": p.price,
             "note": p.note,
-            "tire": tire_data,           
-            "component": component_data, 
-            "warehouse_qty": warehouse_qty.get(p.id, 0),
-            "storage_qty": storage_qty.get(p.id, 0),
+            "tire": tire_data,
+            "component": component_data,
+
+            # Количество
+            "total_qty": w_qty + s_qty,
+            "warehouse_qty": w_qty,
+            "storage_qty": s_qty,
+
+            # ID записей — если есть
+            "warehouse_id": w_data["id"] if w_data else None,
+            "storage_id": s_data["id"] if s_data else None,
+
+            # Для удобства
+            "in_warehouse": w_qty > 0,
+            "in_storage": s_qty > 0,
+            "location": location_str,
         })
 
     return result
@@ -211,10 +234,10 @@ def create_component(item: schemas.ComponentCreate, db: Session = Depends(get_db
     return obj
 
 
-@router.put("/components/{id}", response_model=schemas.ComponentRead)
-@router.put("/components/{id}/", response_model=schemas.ComponentRead)
-def update_component(id: int, item: schemas.ComponentCreate, db: Session = Depends(get_db)):
-    obj = db.query(models.Component).filter_by(product_id=id).first()
+@router.patch("/components/{id}", response_model=schemas.ComponentRead)
+@router.patch("/components/{id}/", response_model=schemas.ComponentRead)
+def update_component(id: int, item: schemas.ComponentUpdate, db: Session = Depends(get_db)):
+    obj = db.query(models.Component).get(id)
     for key, value in item.dict(exclude_unset=True).items():
         setattr(obj, key, value)
     db.commit()
@@ -229,7 +252,7 @@ def update_tire(
         item: schemas.TireUpdate,  
         db: Session = Depends(get_db)
 ):
-    obj = db.query(models.Tire).filter_by(product_id=id).first()
+    obj = db.query(models.Tire).get(id)
     if not obj:
         raise HTTPException(status_code=404, detail="Шина не найдена")
 
@@ -265,8 +288,8 @@ def read_warehouse(db: Session = Depends(get_db),
     return query.all()
 
 
-@router.post("/warehouse/", response_model=schemas.WarehouseRead)
-@router.post("/warehouse", response_model=schemas.WarehouseRead)
+@router.post("/warehouse/", response_model=schemas.WarehouseCreate)
+@router.post("/warehouse", response_model=schemas.WarehouseCreate)
 def create_warehouse(item: schemas.WarehouseCreate, db: Session = Depends(get_db)):
     product = db.query(models.Product).filter(models.Product.id == item.product_id).first()
     if not product:
@@ -374,9 +397,9 @@ def create_storage(item: schemas.StorageCreate, db: Session = Depends(get_db)):
     return obj
 
 
-@router.put("/storage/{id}", response_model=schemas.StorageRead)
-@router.put("/storage/{id}/", response_model=schemas.StorageRead)
-def update_storage(id: int, item: schemas.StorageCreate, db: Session = Depends(get_db)):
+@router.patch("/storage/{id}", response_model=schemas.StorageRead)
+@router.patch("/storage/{id}/", response_model=schemas.StorageRead)
+def update_storage(id: int, item: schemas.StorageUpdate, db: Session = Depends(get_db)):
     obj = db.query(models.Storage).get(id)
     for key, value in item.dict(exclude_unset=True).items():
         setattr(obj, key, value)

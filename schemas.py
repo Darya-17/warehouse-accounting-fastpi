@@ -1,11 +1,6 @@
-
-
 from pydantic import BaseModel
 from typing import Optional, List
 from enum import Enum
-
-
-
 
 
 class SeasonEnum(str, Enum):
@@ -46,12 +41,9 @@ class ComponentCategoryEnum(str, Enum):
 
 class OrderStatusEnum(str, Enum):
     DRAFT = "draft"
-    IN_PROGRESS = "in_progress"   
+    IN_PROGRESS = "in_progress"
     PROCESSED = "processed"
     CANCELLED = "cancelled"
-
-
-
 
 
 class ProductBase(BaseModel):
@@ -72,9 +64,6 @@ class ProductRead(ProductBase):
         orm_mode = True
 
 
-
-
-
 class TireCreate(BaseModel):
     product_id: int
 
@@ -86,7 +75,6 @@ class TireCreate(BaseModel):
     year: Optional[int] = None
     country: Optional[str] = None
     season: Optional[SeasonEnum] = None
-
 
 
 class TireUpdate(BaseModel):
@@ -117,9 +105,6 @@ class TireRead(BaseModel):
         orm_mode = True
 
 
-
-
-
 class ComponentCreate(BaseModel):
     product_id: int
 
@@ -145,14 +130,23 @@ class ComponentRead(BaseModel):
         orm_mode = True
 
 
+class ComponentUpdate(BaseModel):
+    id: int
+    product_id: Optional[int] = None
+    category: Optional[ComponentCategoryEnum] = None
+    parameters: Optional[str] = None
+    compatibility: Optional[str] = None
+    weight: Optional[float] = None
+    material: Optional[str] = None
+    color: Optional[str] = None
 
+    class Config:
+        orm_mode = True
 
 
 class ProductReadWithDetails(ProductRead):
     tire: Optional[TireRead] = None
     component: Optional[ComponentRead] = None
-
-
 
 
 class WarehouseUpdate(BaseModel):
@@ -161,9 +155,6 @@ class WarehouseUpdate(BaseModel):
     shelf: Optional[str] = None
     cell: Optional[str] = None
     quantity: Optional[int] = None
-
-
-
 
 
 class WarehouseBase(BaseModel):
@@ -198,15 +189,20 @@ class StorageCreate(StorageBase):
     pass
 
 
+class StorageUpdate(StorageBase):
+    product_id: Optional[int] = None
+    rack: Optional[str] = None
+    shelf: Optional[str] = None
+    cell: Optional[str] = None
+    quantity: Optional[int] = None
+
+
 class StorageRead(StorageBase):
     id: int
     product: ProductReadWithDetails
 
     class Config:
         orm_mode = True
-
-
-
 
 
 class OrderItemBase(BaseModel):
@@ -231,7 +227,7 @@ class OrderBase(BaseModel):
     status: Optional[OrderStatusEnum] = OrderStatusEnum.DRAFT
     customer_name: Optional[str] = None
     customer_phone: Optional[str] = None
-    service: Optional[str] = None  
+    service: Optional[str] = None
 
 
 class OrderCreate(OrderBase):
@@ -250,12 +246,9 @@ class OrderRead(OrderBase):
         orm_mode = True
 
 
-
-
-
 class InventoryItem(BaseModel):
     id: int
-    location_type: str  
+    location_type: str
     rack: str
     shelf: str
     cell: str
