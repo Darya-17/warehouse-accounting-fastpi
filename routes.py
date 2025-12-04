@@ -624,6 +624,23 @@ def update_order(id: int, item: schemas.OrderUpdate, db: Session = Depends(get_d
                             shelf="Отмена",
                             cell="",
                             quantity=qty
+                        )) 
+                        
+            elif new_status == models.OrderStatusEnum.DRAFT and old_status == models.OrderStatusEnum.PROCESSED:
+                for order_item in order_obj.items:
+                    product_id = order_item.product_id
+                    qty = order_item.quantity
+
+                    wh = db.query(models.Warehouse).filter_by(product_id=product_id).first()
+                    if wh:
+                        wh.quantity += qty
+                    else:
+                        db.add(models.Warehouse(
+                            product_id=product_id,
+                            rack="Возврат",
+                            shelf="Отмена",
+                            cell="",
+                            quantity=qty
                         ))
 
     db.commit()
