@@ -10,6 +10,38 @@ from db import get_db
 router = APIRouter()
 
 
+def find_free_location(db: Session, prefix: str):
+    query = db.query(models.Storage.rack, models.Storage.shelf, models.Storage.cell, models.Storage.quantity)
+
+    query = query.filter(models.Storage.rack.ilike(f"{prefix}%"))
+
+    occupied = query.all()
+
+    rack_data = {}
+    for rack, shelf, cell, qty in occupied:
+        if qty > 0:
+            rack_data.setdefault(rack, []).append((int(shelf), int(cell)))
+
+    possible_racks = [f"{prefix}{i}" for i in range(1, 20)]
+
+    for rack in possible_racks:
+        cells_in_rack = rack_data.get(rack, [])
+
+        max_cell = 0
+        for _, cell in cells_in_rack:
+            if cell > max_cell:
+                max_cell = cell
+
+        next_cell = max_cell + 1
+
+        CELLS_PER_SHELF = 50
+        shelf = next_cell // CELLS_PER_SHELF + 1
+        cell_in_shelf = next_cell % CELLS_PER_SHELF
+
+        return rack, str(shelf), str(cell_in_shelf)
+
+    raise HTTPException(status_code=400, detail=f"Нет свободных мест в стеллажах {prefix}*")
+
 def product_to_pydantic(product: models.Product) -> schemas.ProductReadWithDetails:
     tire_read = None
     component_read = None
@@ -52,7 +84,6 @@ def product_to_pydantic(product: models.Product) -> schemas.ProductReadWithDetai
 
 
 def find_free_warehouse_location(db: Session, prefix: str) -> tuple[str, str, str]:
-    """Находит свободную ячейку в стеллажах с префиксом (З, Л, К)"""
     CELLS_PER_SHELF = 50
 
     occupied = db.query(
@@ -451,23 +482,8 @@ def create_order(item: schemas.OrderCreate, db: Session = Depends(get_db)):
         for order_item in item.items:
             product_id = order_item.product_id
             qty = order_item.quantity
-
-            
-            
-            product = db.query(models.Product).get(product_id)
-            is_large = False
-            if product.tire and product.tire.diameter:
-                try:
-                    diameter = int(product.tire.diameter.replace('"', '').strip())
-                    is_large = diameter >= 18
-                except:
-                    is_large = False
-
-            prefix = "Х" if is_large else "З"  
-
-            rack, shelf, cell = find_free_location(db, prefix, is_large=is_large)
-
-            
+            prefix = "Х"
+            rack, shelf, cell = find_free_location(db, prefix)
             existing = db.query(models.Storage).filter_by(
                 product_id=product_id,
                 rack=rack,
@@ -494,56 +510,36 @@ def create_order(item: schemas.OrderCreate, db: Session = Depends(get_db)):
 @router.patch("/orders/{id}", response_model=schemas.OrderRead)
 @router.patch("/orders/{id}/", response_model=schemas.OrderRead)
 def update_order(id: int, item: schemas.OrderUpdate, db: Session = Depends(get_db)):
-    order_obj = db.query(models.Order).get(id)
+    order_obj: models.Order = db.query(models.Order).get(id)
     if not order_obj:
         raise HTTPException(status_code=404, detail="Order not found")
 
     old_status = order_obj.status
     new_status = item.status or old_status
     is_storage_service = order_obj.service == "хранение"
-
-    
     update_data = item.dict(exclude={"items"}, exclude_unset=True)
     for key, value in update_data.items():
         setattr(order_obj, key, value)
-
-    
     if new_status != old_status:
-
-        
-        
-        
         if is_storage_service:
 
-            
             if new_status == models.OrderStatusEnum.DRAFT:
                 for order_item in order_obj.items:
                     product_id = order_item.product_id
                     qty = order_item.quantity
-
-                    
-                    product = db.query(models.Product).get(product_id)
-                    is_large = False
-                    if product and product.tire and product.tire.diameter:
-                        try:
-                            diameter = int(product.tire.diameter.replace('"', '').strip())
-                            is_large = diameter >= 18
-                        except (ValueError, AttributeError):
-                            is_large = False
-
-                    prefix = "Х" if is_large else "З"  
-
-                    
+                    if is_storage_service:
+                        prefix = "Х"
+                    elif order_item.product.tire is not None:
+                        prefix = 'З' if order_item.product.tire.season else 'Л'
+                    else:
+                        prefix = 'К'
                     rack, shelf, cell = find_free_location(db, prefix)
-
-                    
                     existing = db.query(models.Storage).filter_by(
                         product_id=product_id,
                         rack=rack,
                         shelf=shelf,
                         cell=cell
                     ).first()
-
                     if existing:
                         existing.quantity += qty
                     else:
